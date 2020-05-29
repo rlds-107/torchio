@@ -29,8 +29,9 @@ class WeightedSampler(IterableDataset):
         patch_size: Tuple of integers :math:`(d, h, w)` to generate patches
             of size :math:`d \times h \times w`.
             If a single number :math:`n` is provided, :math:`d = h = w = n`.
-        probability_map_name: Name of the image in the sample that will be used
-            as a probability map.
+        probability_map: Name of the image in the sample that will be used
+            as a probability map. If ``None``, all voxels have the same
+            probability of being at the patch center.
 
     .. note:: The index of the center of a patch with even size :math:`s` is
         arbitrarily set to :math:`s/2`. This is an implementation detail that
@@ -45,7 +46,7 @@ class WeightedSampler(IterableDataset):
             self,
             sample: Subject,
             patch_size: Union[int, Sequence[int]],
-            probability_map_name: Optional[str] = None,
+            probability_map: Optional[str] = None,
             ):
         sample.check_consistent_shape()
         self.sample = sample
@@ -57,8 +58,7 @@ class WeightedSampler(IterableDataset):
                 f' larger than image size {tuple(sample.spatial_shape)}'
             )
             raise ValueError(message)
-        self.probability_map = self.process_probability_map(
-            probability_map_name)
+        self.probability_map = self.process_probability_map(probability_map)
         self.cdf, self.sort_indices = self.get_cumulative_distribution_function(
             self.probability_map)
 
