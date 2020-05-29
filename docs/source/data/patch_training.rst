@@ -1,8 +1,8 @@
 Training
 ========
 
-Random samplers
----------------
+Patch samplers
+--------------
 
 TorchIO includes grid, uniform and label patch samplers. There is also an
 aggregator used for dense predictions.
@@ -11,6 +11,14 @@ For more information about patch-based training, see
 
 
 .. currentmodule:: torchio.data
+
+
+:class:`WeightedSampler`
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: WeightedSampler
+    :members:
+    :show-inheritance:
 
 
 :class:`ImageSampler`
