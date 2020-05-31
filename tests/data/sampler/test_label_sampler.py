@@ -1,5 +1,5 @@
-from ..utils import TorchioTestCase
 from torchio.data import LabelSampler
+from ...utils import TorchioTestCase
 
 
 class TestLabelSampler(TorchioTestCase):
