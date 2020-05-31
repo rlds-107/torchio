@@ -59,10 +59,7 @@ class WeightedSampler(PatchSampler):
                 f' larger than image size {tuple(sample.spatial_shape)}'
             )
             raise RuntimeError(message)
-        probability_map = self.get_probability_map(
-            sample,
-            self.probability_map_name,
-        )
+        probability_map = self.get_probability_map(sample)
         probability_map = self.process_probability_map(probability_map)
         cdf, sort_indices = self.get_cumulative_distribution_function(
             probability_map)
@@ -70,21 +67,19 @@ class WeightedSampler(PatchSampler):
         while True:
             yield self.extract_patch(sample, probability_map, cdf, sort_indices)
 
-    def get_probability_map(self, sample, probability_map_name):
-        if probability_map_name is None:
-            data = torch.ones(sample.shape)
-        elif probability_map_name in sample:
-            data = sample[probability_map_name].data
+    def get_probability_map(self, sample):
+        if self.probability_map_name in sample:
+            data = sample[self.probability_map_name].data
         else:
             message = (
-                f'Image "{probability_map_name}"'
+                f'Image "{self.probability_map_name}"'
                 f' not found in subject sample: {sample}'
             )
             raise KeyError(message)
         if torch.any(data < 0):
             message = (
                 'Negative values found'
-                f' in probability map "{probability_map_name}"'
+                f' in probability map "{self.probability_map_name}"'
             )
             raise ValueError(message)
         return data
@@ -139,9 +134,26 @@ class WeightedSampler(PatchSampler):
 
     @staticmethod
     def get_cumulative_distribution_function(probability_map):
-        # Get the sorting indices to that we can invert the sorting later on
+        """Return the CDF of a probability map.
+
+        The cumulative distribution function (CDF) is computed as follows:
+
+        1. Flatten probability map
+        2. Normalize it
+        3. Compute sorting indices
+        4. Sort flattened map
+        5. Compute cumulative sum
+
+        For example,
+        if the probability map is [0, 0, 1, 2, 5, 1, 1, 0],
+        the normalized version is [0.0, 0.0, 0.1, 0.2, 0.5, 0.1, 0.1, 0.0],
+        the sorting indices are [0, 1, 7, 2, 5, 6, 3, 4],
+        the sorted map is [0.0, 0.0, 0.0, 0.1, 0.1, 0.1, 0.2, 0.5],
+        and the CDF is [0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.5, 1.0].
+        """
         flat_map = probability_map.flatten()
         flat_map_normalized = flat_map / flat_map.sum()
+        # Get the sorting indices to that we can invert the sorting later on
         sort_indices = np.argsort(flat_map_normalized)
         flat_map_normalized_sorted = flat_map_normalized[sort_indices]
         cdf = np.cumsum(flat_map_normalized_sorted)

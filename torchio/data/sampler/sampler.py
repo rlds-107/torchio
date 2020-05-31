@@ -18,14 +18,24 @@ class PatchSampler:
             If a single number :math:`n` is provided, :math:`d = h = w = n`.
     """
     def __init__(self, patch_size: Union[int, Sequence[int]]):
-        patch_size = to_tuple(patch_size, length=3)
-        self.patch_size = np.array(patch_size, dtype=np.uint16)
+        patch_size = np.array(to_tuple(patch_size, length=3))
+        if np.any(patch_size < 1):
+            message = (
+                'Patch dimensions must be positive integers,'
+                f' not {patch_size}'
+            )
+            raise ValueError(message)
+        self.patch_size = patch_size.astype(np.uint16)
 
     def __call__(self):
         raise NotImplementedError
 
+    def get_probability_map(self):
+        raise NotImplementedError
+
     def extract_patch(self):
         raise NotImplementedError
+
 
 
 def crop(

@@ -16,15 +16,15 @@ class LabelSampler(WeightedSampler):
             generate the sampling probability map.
     """
     def __init__(self, patch_size, label_name):
-        super().__init__(patch_size, label_name)
+        super().__init__(patch_size, probability_map=label_name)
 
-    def get_probability_map(self, sample, probability_map_name):
-        """Return binarized image."""
-        if probability_map_name in sample:
-            data = sample[probability_map_name].data > 0.5
+    def get_probability_map(self, sample):
+        """Return binarized image for sampling."""
+        if self.probability_map_name in sample:
+            data = sample[self.probability_map_name].data > 0.5
         else:
             message = (
-                f'Image "{probability_map_name}"'
+                f'Image "{self.probability_map_name}"'
                 f' not found in subject sample: {sample}'
             )
             raise KeyError(message)
