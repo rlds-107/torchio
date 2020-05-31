@@ -1,19 +1,18 @@
 import copy
-from typing import Union, Sequence, Generator, Tuple, Optional
+from typing import Union, Sequence, Generator, Optional
 
 import numpy as np
 
 import torch
-from torch.utils.data import IterableDataset
 
 from ...torchio import DATA
-from ...utils import to_tuple
 from ..subject import Subject
+from .sampler import PatchSampler
 
 
 
-class WeightedSampler(IterableDataset):
-    r"""Extract random patches from a volume given a probability map.
+class WeightedSampler(PatchSampler):
+    r"""Randomly extract patches from a volume given a probability map.
 
     The probability of sampling a patch centered on a specific voxel is the
     value of that voxel in the probability map. The probabilities need not be
@@ -44,46 +43,61 @@ class WeightedSampler(IterableDataset):
     """
     def __init__(
             self,
-            sample: Subject,
             patch_size: Union[int, Sequence[int]],
             probability_map: Optional[str] = None,
             ):
+        super().__init__(patch_size)
+        self.probability_map_name = probability_map
+        self.cdf = None
+        self.sort_indices = None
+
+    def __call__(self, sample):
         sample.check_consistent_shape()
-        self.sample = sample
-        patch_size = to_tuple(patch_size, length=3)
-        self.patch_size = np.array(patch_size, dtype=np.uint16)
         if np.any(self.patch_size > sample.spatial_shape):
             message = (
                 f'Patch size {tuple(self.patch_size)} cannot be'
                 f' larger than image size {tuple(sample.spatial_shape)}'
             )
-            raise ValueError(message)
-        self.probability_map = self.process_probability_map(probability_map)
-        self.cdf, self.sort_indices = self.get_cumulative_distribution_function(
-            self.probability_map)
+            raise RuntimeError(message)
+        probability_map = self.get_probability_map(
+            sample,
+            self.probability_map_name,
+        )
+        probability_map = self.process_probability_map(probability_map)
+        cdf, sort_indices = self.get_cumulative_distribution_function(
+            probability_map)
 
-    def __iter__(self) -> Generator[Subject, None, None]:
         while True:
-            yield self.extract_patch()
+            yield self.extract_patch(sample, probability_map, cdf, sort_indices)
 
-    def process_probability_map(self, probability_map_name):
-        if probability_map_name in self.sample:
-            data = self.sample[probability_map_name].data.copy()
+    def get_probability_map(self, sample, probability_map_name):
+        if probability_map_name is None:
+            data = torch.ones(sample.shape)
+        elif probability_map_name in sample:
+            data = sample[probability_map_name].data
         else:
-            data = torch.ones(self.sample.shape)
-        # Using float32 creates cdf with maximum very far from 1, e.g. 0.92!
-        data = data[0].numpy().astype(np.float64)
-        assert data.ndim == 3
-        if np.any(data < 0):
+            message = (
+                f'Image "{probability_map_name}"'
+                f' not found in subject sample: {sample}'
+            )
+            raise KeyError(message)
+        if torch.any(data < 0):
             message = (
                 'Negative values found'
                 f' in probability map "{probability_map_name}"'
             )
             raise ValueError(message)
+        return data
+
+    def process_probability_map(self, probability_map):
+        # Using float32 can create cdf with maximum very far from 1, e.g. 0.92!
+        data = probability_map[0].numpy().astype(np.float64)
+        assert data.ndim == 3
         if data.sum() == 0:  # although it should not be empty
             data += 1  # make uniform
         data /= data.sum()  # normalize probabilities
         self.clear_probability_borders(data, self.patch_size)
+        assert data.sum() > 0
         return data
 
     @staticmethod
@@ -106,14 +120,16 @@ class WeightedSampler(IterableDataset):
         #  x x x x x x x      . . . . . . .
         #
         # The dots represent removed probabilities, x mark possible locations
-
-        crop_i, crop_j, crop_k = crop = np.array(patch_size) // 2
+        crop_ini = patch_size // 2
+        crop_fin = (patch_size - 1) // 2
+        crop_i, crop_j, crop_k = crop_ini
         probability_map[:crop_i, :, :] = 0
         probability_map[:, :crop_j, :] = 0
         probability_map[:, :, :crop_k] = 0
 
-        # Subtract 1 to even numbers
-        crop_i, crop_j, crop_k = [n - (n + 1) % 2 if n > 0 else n for n in crop]
+        # The call tolist() is very important. Using np.uint16 as negative index
+        # will not work because e.g. -np.uint16(2) == 65534
+        crop_i, crop_j, crop_k = crop_fin.tolist()
         if crop_i:
             probability_map[-crop_i:, :, :] = 0
         if crop_j:
@@ -121,25 +137,33 @@ class WeightedSampler(IterableDataset):
         if crop_k:
             probability_map[:, :, -crop_k:] = 0
 
-    def get_random_index_ini(self):
-        center = self.sample_probability_map()
-
-        # See self.clear_probability_borders
-        index_ini = center - self.patch_size // 2
-        assert np.all(index_ini >= 0)
-        return index_ini
-
     @staticmethod
     def get_cumulative_distribution_function(probability_map):
         # Get the sorting indices to that we can invert the sorting later on
         flat_map = probability_map.flatten()
         flat_map_normalized = flat_map / flat_map.sum()
         sort_indices = np.argsort(flat_map_normalized)
-        flat_map_normalized_sorted = flat_map[sort_indices]
+        flat_map_normalized_sorted = flat_map_normalized[sort_indices]
         cdf = np.cumsum(flat_map_normalized_sorted)
         return cdf, sort_indices
 
-    def sample_probability_map(self):
+    def extract_patch(self, sample, probability_map, cdf, sort_indices) -> Subject:
+        # TODO: replace with Crop transform
+        index_ini = self.get_random_index_ini(probability_map, cdf, sort_indices)
+        cropped_sample = self.copy_and_crop(sample, index_ini)
+        assert cropped_sample.spatial_shape == tuple(self.patch_size)
+        return cropped_sample
+
+    def get_random_index_ini(self, probability_map, cdf, sort_indices):
+        center = self.sample_probability_map(probability_map, cdf, sort_indices)
+        assert np.all(center >= 0)
+
+        # See self.clear_probability_borders
+        index_ini = center - self.patch_size // 2
+        assert np.all(index_ini >= 0)
+        return index_ini
+
+    def sample_probability_map(self, probability_map, cdf, sort_indices):
         """Inverse transform sampling.
 
         Example:
@@ -161,29 +185,28 @@ class WeightedSampler(IterableDataset):
         # Get first value larger than random number
         random_number = torch.rand(1).item()
         # If probability map is float32, cdf.max() can be far from 1, e.g. 0.92
-        if random_number > self.cdf.max():
+        if random_number > cdf.max():
             cdf_index = -1
         else:  # proceed as usual
-            cdf_index = np.argmax(random_number < self.cdf)
+            cdf_index = np.argmax(random_number < cdf)
 
-        random_location_index = self.sort_indices[cdf_index]
+        random_location_index = sort_indices[cdf_index]
         center = np.unravel_index(
             random_location_index,
-            self.probability_map.shape
+            probability_map.shape
         )
+
+        i, j, k = center
+        probability = probability_map[i, j, k]
+        assert probability > 0
+
         center = np.array(center).astype(int)
         return center
 
-    def extract_patch(self) -> Subject:
-        # TODO: replace with Crop transform
-        index_ini = self.get_random_index_ini()
-        cropped_sample = self.copy_and_crop(index_ini)
-        return cropped_sample
-
-    def copy_and_crop(self, index_ini: np.ndarray) -> dict:
+    def copy_and_crop(self, sample, index_ini: np.ndarray) -> dict:
         index_fin = index_ini + self.patch_size
-        cropped_sample = copy.deepcopy(self.sample)
-        iterable = self.sample.get_images_dict(intensity_only=False).items()
+        cropped_sample = copy.deepcopy(sample)
+        iterable = sample.get_images_dict(intensity_only=False).items()
         for image_name, image in iterable:
             cropped_sample[image_name] = copy.deepcopy(image)
             sample_image_dict = image
@@ -201,5 +224,6 @@ class WeightedSampler(IterableDataset):
             index_fin: np.ndarray,
             ) -> Union[np.ndarray, torch.Tensor]:
         i_ini, j_ini, k_ini = index_ini
+        assert np.all(np.array(index_fin) <= np.array(data.shape[1:]))
         i_fin, j_fin, k_fin = index_fin
         return data[..., i_ini:i_fin, j_ini:j_fin, k_ini:k_fin]
